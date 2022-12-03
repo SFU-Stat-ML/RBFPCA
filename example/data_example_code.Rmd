@@ -1,0 +1,748 @@
+---
+title: "Examples"
+author: "Erin Zhang"
+date: "15/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages}
+library(tidyverse)
+library(ncdf4)
+library(fdaoutlier)
+library(data.table)
+library(tictoc)
+library(orthopolynom) # Legendre basis
+library(pracma)
+library(MASS)
+library(refund)
+library(MCMCpack)
+library(plotly)
+library(mnormt)
+library(tmvtnorm)
+library(foreach)
+library(doMC)
+library(tmvnsim)
+library(fdapace)
+library(ggpubr)
+library(zoo)
+library(mvtnorm)
+library(matrixcalc)
+library(LaplacesDemon)
+
+source(file = "model/RBFPCA_fun.R")
+source(file = "model/helper.R")
+
+```
+
+# Example 1: Hawaii Ocean Oxygen Data
+
+```{r Ex1 - load data}
+
+data.raw <- read_delim(file = "data/Hawaii_Ocean_Oxygen.txt",
+                   delim = ",", col_names = FALSE)
+
+data.raw <- data.raw %>%
+  dplyr::select(-X5) %>%
+  rename("ID1" = "X1", "ID2" = "X2",
+         "depth" = "X3", "oxygen" = "X4") %>%
+  mutate(depth = as.numeric(depth), oxygen = as.numeric(oxygen)) %>%
+  dplyr::filter(depth != 0)
+
+ggplot(data.raw, aes(x = depth, y = oxygen)) +
+  geom_line(aes(group = ID2), alpha = 0.3) + 
+  labs(y = "Oxygen level", y = "Depth") +
+  theme_bw(base_size = 16)
+
+data <- data.raw %>%
+  pivot_wider(names_from = depth, values_from = oxygen) %>%
+  dplyr::select(-ID1, -ID2) %>%
+  t()
+rownames(data)  = seq(1, nrow(data))
+
+# demean data
+data.mean.curve <- rowMeans(data)
+data.demean <- apply(data, 2, function(x) x-data.mean.curve)
+
+matplot(x=data.demean, lty=1, type="l",col="black") 
+
+```
+
+```{r Ex1 - run analysis}
+
+##### RBFPCA #####
+K.FPCA <- 5
+seed <- 12345
+n.iter <- 5000
+n.thin <- 1
+
+registerDoMC((detectCores() - 1))
+RBFPCA <- RBFPCA(data = data.demean, num.basis = 15, num.PC = K.FPCA,
+                 n.iter = n.iter, seed = seed, cov.index = 1)
+
+check.traceplot.RBFPCA(RBFPCA.result = RBFPCA, n.iter = n.iter/n.thin,
+                       iter.burnin = 50, n.burnin = 1,
+                       i.plot = sample(1:ncol(data.demean), 1),
+                       t.plot = sample(1:nrow(data.demean), 1),
+                       k1.plot = sample(1:K.FPCA, 1),
+                       k2.plot = sample(1:K.FPCA, 1))
+
+iter.burnin = n.iter/2
+
+Lambda.path <- lapply(RBFPCA$Lambda.inv, inv)
+Lambda.posterior.mean <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+H <- RBFPCA$H
+Uk <- RBFPCA$Uk
+RBFPCA.cov <- H %*% Uk %*% Lambda.posterior.mean %*% t(Uk) %*% t(H)
+RBFPCA.corr <- cov2cor(RBFPCA.cov)
+
+# cumulative variance explained
+RBFPCA.values <- eigen(RBFPCA.cov)$values
+(RBFPCA.cumFVE <- cumsum(RBFPCA.values)[1:K.FPCA] / sum(RBFPCA.values[RBFPCA.values > 0]))
+
+# get FPCs
+RBFPCA.FPC <- eigen(RBFPCA.cov)$vectors[, 1:K.FPCA]
+
+# get fpc scores
+RBFPCA.FPC.scores <- t(data.demean) %*% (eigen(RBFPCA.cov)$vectors[, 1:K.FPCA])
+
+##### PACE #####
+# reformat data for PACE function
+data.reformat <- fdapace::MakeFPCAInputs(tVec = seq(1, nrow(data), 1),
+                                         yVec = t(data))
+CheckData(data.reformat$Ly, data.reformat$Lt)
+PACE.FPCA <- fdapace::FPCA(Ly = data.reformat$Ly, Lt = data.reformat$Lt, list(FVEthreshold = 0.9999))
+PACE.FPCA$cumFVE 
+
+PACE.FPC <- PACE.FPCA$phi
+#PACE.FPC[, 4] <- -1 * PACE.FPC[, 4] # flip PCs for comparison if needed
+
+```
+
+```{r Ex1 - result and plot}
+
+## outlier detection
+threshold <- 0.9999
+dist.RBFPCA <- RobStatTM::covRob(RBFPCA.FPC.scores)$dist 
+est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = K.FPCA)]
+
+N.obs <- ncol(data)
+N.tp <- nrow(data)
+df.mean <- data.frame(time = 2*(1:N.tp),
+                      mean = rowMeans(data))
+df.mean.outlier.remove <- data.frame(time = 2*(1:N.tp),
+                                     new.mean = rowMeans(data[, -est.outlier.ind]))
+df1 <- data.frame(time = 2*(1:N.tp),
+                  data[, est.outlier.ind]) %>%
+  pivot_longer(cols = 2:(ncol(.)))
+df2 <- data.frame(time = 2*(1:N.tp),
+                  data[, -est.outlier.ind]) %>%
+  pivot_longer(cols = 2:(ncol(.)))
+
+ggplot() + 
+  geom_line(df2, mapping=aes(x = time, y = value, group = name, color = "normal"), alpha = 0.4) +
+  geom_line(df1, mapping=aes(x = time, y = value, group = name, color = "outlier"), alpha = 0.6) +
+  geom_line(df.mean, mapping = aes(x = time, y = mean), linetype = 2, linewidth = 1) +
+  labs(x = "Depth", y = "Oxygen", title = round(threshold, 4)) +
+  scale_color_manual(name = "Types",
+                     values = c("outlier" = "blue", "normal" = "darkgrey")) +
+  scale_linetype_manual(name = "") +
+  theme_bw(base_size = 14) +
+  theme(axis.line = element_line(color='black', linewidth = 0.1),
+        plot.background = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank())
+
+
+## plot FPCs
+colnames(RBFPCA.FPC) <- paste0("FPC", seq(1, K.FPCA))
+colnames(PACE.FPC) <- paste0("FPC", seq(1, ncol(PACE.FPC)))
+
+df.FPC.1 <- data.frame(time = 2*(1:N.tp),
+                       group = "RBFPCA",
+                       RBFPCA.FPC[, 1:4]) %>%
+  pivot_longer(cols = 3:(ncol(.)))
+df.FPC.2 <- data.frame(time = 2*(1:N.tp),
+                       group = "PACE",
+                       PACE.FPC[, 1:4]) %>%
+  pivot_longer(cols = 3:(ncol(.)))
+df.FPC <- bind_rows(df.FPC.1, df.FPC.2)
+df.FPC$group <- factor(df.FPC$group, levels = c("RBFPCA", "PACE"))
+
+ggplot() + 
+  geom_smooth(df.FPC, mapping = aes(x = time, y = value, color = group), linewidth = 0.5, se = FALSE) +
+  labs(x = "Depth", y = "FPC") +
+  scale_color_manual(name = "Methods",
+                     values = c("PACE" = "blue", "RBFPCA" = "black")) +
+  facet_wrap(.~name, nrow = 2) +
+  theme_bw(base_size = 14) 
+
+
+df.FPC.1$name[df.FPC.1$name == "FPC1"] = paste0("FPC1 (", round(RBFPCA.cumFVE[1], 4),")")
+df.FPC.1$name[df.FPC.1$name == "FPC2"] = paste0("FPC2 (", round(RBFPCA.cumFVE[2] - RBFPCA.cumFVE[1], 4),")")
+df.FPC.1$name[df.FPC.1$name == "FPC3"] = paste0("FPC3 (", round(RBFPCA.cumFVE[3] - RBFPCA.cumFVE[2], 4),")")
+df.FPC.1$name[df.FPC.1$name == "FPC4"] = paste0("FPC4 (", round(RBFPCA.cumFVE[4] - RBFPCA.cumFVE[3], 4),")")
+ggplot() + 
+  geom_smooth(df.FPC.1, mapping = aes(x = time, y = value), linewidth = 0.5, se = FALSE) +
+  geom_hline(yintercept = 0, color = "grey", linetype = 2) +
+  labs(x = "Depth", y = "FPC") +
+  facet_wrap(.~name, nrow = 2) +
+  theme_bw(base_size = 14) +
+  theme(axis.line = element_line(color='black', linewidth = 0.1),
+        plot.background = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank())
+
+
+```
+
+
+# Example 2: Annual Sea Surface Temperature
+
+```{r Ex2 - load data}
+
+data.raw <- read.table(file = "data/Annual_Sea_Surface_Temperature.txt",
+                       sep = "" , header = TRUE)
+
+data <- data.raw %>%
+  dplyr::filter(YR != 2022) %>%
+  dplyr::select(1:3) %>% 
+  pivot_wider(names_from = MON, values_from = NINO1.2) %>%
+  column_to_rownames(var = "YR") %>%
+  t()
+
+matplot(x = data, lty=1, type="l",col = rainbow(ncol(data))) 
+
+# demean data
+data.mean.curve <- rowMeans(data)
+data.demean <- apply(data, 2, function(x) x-data.mean.curve)
+
+matplot(x = data.demean, lty=1, type="l",col="black") 
+
+```
+
+```{r Ex2 - run analysis}
+
+##### RBFPCA #####
+K.FPCA <- 5
+seed <- 12345
+n.iter <- 50
+n.thin <- 1
+
+registerDoMC((detectCores() - 1))
+RBFPCA <- RBFPCA(data = data.demean, num.basis = 10, num.PC = K.FPCA,
+                          n.iter = n.iter, seed = seed, cov.index = 1)
+
+check.traceplot.RBFPCA(RBFPCA.result = RBFPCA, n.iter = n.iter/n.thin,
+                       iter.burnin = 50, n.burnin = 1,
+                       i.plot = sample(1:ncol(data.demean), 1),
+                       t.plot = sample(1:nrow(data.demean), 1),
+                       k1.plot = sample(1:K.FPCA, 1),
+                       k2.plot = sample(1:K.FPCA, 1))
+
+iter.burnin = n.iter/2
+
+Lambda.path <- lapply(RBFPCA$Lambda.inv, inv)
+Lambda.posterior.mean <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+H <- RBFPCA$H
+Uk <- RBFPCA$Uk
+RBFPCA.cov <- H %*% Uk %*% Lambda.posterior.mean %*% t(Uk) %*% t(H)
+RBFPCA.corr <- cov2cor(RBFPCA.cov)
+
+# cumulative variance explained
+RBFPCA.values <- eigen(RBFPCA.cov)$values
+(RBFPCA.cumFVE <- cumsum(RBFPCA.values)[1:K.FPCA] / sum(RBFPCA.values[RBFPCA.values > 0]))
+
+# get FPCs
+RBFPCA.FPC <- eigen(RBFPCA.cov)$vectors[, 1:K.FPCA]
+
+# get fpc scores
+RBFPCA.FPC.scores <- t(data.demean) %*% (eigen(RBFPCA.cov)$vectors[, 1:K.FPCA])
+
+##### PACE #####
+# reformat data for PACE function
+data.reformat <- fdapace::MakeFPCAInputs(tVec = seq(1, nrow(data), 1),
+                                         yVec = t(data))
+CheckData(data.reformat$Ly, data.reformat$Lt)
+PACE.FPCA <- fdapace::FPCA(Ly = data.reformat$Ly, Lt = data.reformat$Lt, list(FVEthreshold = 0.9999))
+PACE.FPCA$cumFVE 
+
+PACE.FPC <- PACE.FPCA$phi
+#PACE.FPC[, c(1,2,4)] <- -1 * PACE.FPC[, c(1,2,4)]  # flip PCs for comparison if needed
+
+```
+
+```{r Ex2 - result and plot}
+
+## outlier detection
+threshold <- 0.995
+dist.RBFPCA <- RobStatTM::covRob(RBFPCA.FPC.scores)$dist 
+est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = K.FPCA)]
+
+N.obs <- ncol(data)
+N.tp <- nrow(data)
+
+colnames(data)
+
+df <- data.frame(time = 1:12,
+                 data) %>%
+  pivot_longer(cols = 2:(ncol(.))) %>%
+  mutate(year = as.numeric(substr(name, 2, 5)),
+         date = as.yearmon(paste(year, time), "%Y %m")) %>%
+  arrange(date)
+df.outlier <- data.frame(time = 1:12,
+                  data[, est.outlier.ind]) %>%
+  pivot_longer(cols = 2:(ncol(.))) %>%
+  mutate(year = as.numeric(substr(name, 2, 5)),
+         date = as.yearmon(paste(year, time), "%Y %m")) %>%
+  arrange(date) %>%
+  mutate(Year = as.factor(year))
+  
+ggplot() +
+  geom_point(df, mapping = aes(x = date, y = value), color = "grey", size = 0.4, alpha = 0.6) +
+  geom_line(df, mapping = aes(x = date, y = value), color = "grey", linewidth = 0.4, alpha = 0.6) +
+  geom_line(df.outlier, mapping = aes(x = date, y = value, group = Year, color = Year), linewidth = 0.7) +
+  labs(x = "Year", y = "Sea Surface Temperature") +
+  scale_x_continuous(breaks = scales::breaks_pretty(n = 6)) +
+  theme_bw(base_size = 20) +
+  theme(axis.line = element_line(color='black', linewidth = 0.1),
+        plot.background = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()) +
+  theme(legend.position= "bottom")
+
+df1 <- data.frame(time = 1:12,
+                  data[, est.outlier.ind]) %>%
+  pivot_longer(cols = 2:(ncol(.)))
+df2 <- data.frame(time = 1:12,
+                  data[, -est.outlier.ind]) %>%
+  pivot_longer(cols = 2:(ncol(.)))
+df.8283 <- data.frame(time = 1:12,
+                  data[, est.outlier.ind[c(1,2)]]) %>%
+  pivot_longer(cols = 2:(ncol(.)))
+df.9798 <- data.frame(time = 1:12,
+                  data[, est.outlier.ind[c(3,4)]]) %>%
+  pivot_longer(cols = 2:(ncol(.)))
+
+ggplot() + 
+  geom_line(df2, mapping=aes(x = time, y = value, group = name, color = "normal"), alpha = 0.4) +
+  geom_line(df1, mapping=aes(x = time, y = value, group = name, color = "outlier")) +
+  geom_point(df.8283, mapping=aes(x = time, y = value, group = name, shape = "event 1"),
+             size = 2.5, color = "black") +
+  geom_point(df.9798, mapping=aes(x = time, y = value, group = name, shape = "event 2"), 
+             size = 2.5, color = "black") +
+  labs(x = "Month", y = "Sea Surface Temperature") +
+  annotate("text", x = 1.5, y = 28.95, label= "1998", color = "#C77CFF", fontface = 2, size = 5) + 
+  annotate("text", x = 1.5, y = 27.05, label= "1983", color = "#7CAE00", fontface = 2, size = 5) +
+  annotate("text", x = 11.5, y = 27.2, label= "1997", color = "#00BFC4", fontface = 2, size = 5) + 
+  annotate("text", x = 11.5, y = 24.5, label= "1982", color = "#F8766D", fontface = 2, size = 5) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 12)) +
+  scale_color_manual(name = "",
+                     values = c("outlier" = "blue", "normal" = "darkgrey")) +
+  scale_shape_manual(name = "",
+                     values = c("event 1" = 15, "event 2" = 17)) +
+  theme_bw(base_size = 20) +
+  theme(axis.line = element_line(color='black', linewidth = 0.1),
+        plot.background = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()) +
+  theme(legend.position = "bottom")
+
+#ggarrange(a, b, nrow = 1, ncol = 2, common.legend = TRUE)
+
+## plot FPCs
+colnames(RBFPCA.FPC) <- paste0("FPC", seq(1, K.FPCA))
+colnames(PACE.FPC) <- paste0("FPC", seq(1, ncol(PACE.FPC)))
+
+df.FPC.1 <- data.frame(time = 1:12,
+                       group = "RBFPCA",
+                       RBFPCA.FPC[, 1:4]) %>%
+  pivot_longer(cols = 3:(ncol(.)))
+df.FPC.2 <- data.frame(time = 1:12,
+                       group = "PACE",
+                       PACE.FPC[, 1:4]) %>%
+  pivot_longer(cols = 3:(ncol(.)))
+df.FPC <- bind_rows(df.FPC.1, df.FPC.2)
+df.FPC$group <- factor(df.FPC$group, levels = c("RBFPCA", "PACE"))
+
+ggplot() + 
+  geom_smooth(df.FPC, mapping = aes(x = time, y = value, color = group), linewidth = 0.5, se = FALSE) +
+  labs(x = "Month", y = "FPC") +
+  scale_color_manual(name = "Methods",
+                     values = c("PACE" = "blue", "RBFPCA" = "black")) +
+  scale_x_continuous(breaks = seq(1, 12)) +
+  facet_wrap(.~name, nrow = 2) +
+  theme_bw(base_size = 14) 
+  
+
+df.FPC.1$name[df.FPC.1$name == "FPC1"] = paste0("FPC1 (", round(RBFPCA.cumFVE[1], 4),")")
+df.FPC.1$name[df.FPC.1$name == "FPC2"] = paste0("FPC2 (", round(RBFPCA.cumFVE[2] - RBFPCA.cumFVE[1], 4),")")
+df.FPC.1$name[df.FPC.1$name == "FPC3"] = paste0("FPC3 (", round(RBFPCA.cumFVE[3] - RBFPCA.cumFVE[2], 4),")")
+df.FPC.1$name[df.FPC.1$name == "FPC4"] = paste0("FPC4 (", round(RBFPCA.cumFVE[4] - RBFPCA.cumFVE[3], 4),")")
+ggplot() + 
+  geom_smooth(df.FPC.1, mapping = aes(x = time, y = value), linewidth = 0.5, se = FALSE) +
+  geom_hline(yintercept = 0, color = "grey", linetype = 2) +
+  labs(x = "Month", y = "FPC") +
+  scale_x_continuous(breaks = seq(1, 12)) +
+  facet_wrap(.~name, nrow = 2) +
+  theme_bw(base_size = 14) +
+  theme(axis.line = element_line(color='black', linewidth = 0.1),
+        plot.background = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank())
+
+
+```
+
+
+# Example 3: CD4 Data
+
+```{r Ex3 - load data}
+
+set.seed(1234)
+
+n.obs.min <- 3
+
+data(aids, package='catdata')
+X <- vector('list', 2) 
+names(X) <- c('x', 'pp')
+X$x <- split(aids$cd4, aids$person)
+X$pp <- split(aids$time, aids$person)
+
+# To ensure that there are enough observations to estimate the covariance function at every pair of times `(s, t)`, 
+# we only consider observations for which `t >= 0`, and remove individuals that have less than five measurements. 
+n <- length(X$x)
+shorts <- vector('logical', n)
+for(i in 1:n) {
+  tmp <- (X$pp[[i]] >= 0)
+  X$pp[[i]] <- (X$pp[[i]])[tmp]
+  X$x[[i]] <- (X$x[[i]])[tmp]
+  if( length(X$pp[[i]]) < n.obs.min ) shorts[i] <- TRUE
+}
+X$x <- X$x[!shorts]
+X$pp <- X$pp[!shorts]
+
+# This results in a data set with `N = 154` curves, 
+# where the number of observations per individual ranges between 5 and 11 (with a median of 6):
+length(X$x)
+summary(lens <- sapply(X$x, length))
+table(lens)
+
+# The following figure shows the data set with three randomly chosen trajectories highlighted with solid black lines
+xmi <- min( tmp <- unlist(X$x) )
+xma <- max( tmp )
+ymi <- min( tmp <- unlist(X$pp) )
+yma <- max( tmp ) 
+n <- length(X$x)
+plot(seq(ymi, yma, length=5), seq(xmi, xma,length=5), type='n', xlab='Year', ylab='CD4 Cell Count',
+     cex.lab = 1.5, cex.axis = 1.5)
+for(i in 1:n) { lines(X$pp[[i]], X$x[[i]], col='gray', lwd=1, type='o', pch=20, 
+                     cex=0.8) }
+lens <- sapply(X$x, length)
+
+ii <- c(sample((1:n)[lens==3], 1), sample((1:n)[lens==7], 1), 
+        sample((1:n)[lens==10], 1))
+for(i in ii) lines(X$pp[[i]], X$x[[i]], col='black', lwd=4, type='b', pch=19, 
+                   cex=1, lty=1)
+
+## demean the curves
+# run PACE to get the estimated mean curve
+CheckData(X$x, X$pp)
+PACE.FPCA <- fdapace::FPCA(Ly = X$x, Lt = X$pp, list(FVEthreshold = 0.99))
+PACE.FPCA$cumFVE
+pace.mean <- data.frame(mean = PACE.FPCA$mu, t = seq(from = ymi, to = yma, length.out = length(PACE.FPCA$mu)))
+
+# add mean
+lines(seq(from = ymi, to = yma, length.out = nrow(pace.mean)), pace.mean$mean, 
+      col='black', lwd=4, type='l', pch=19, cex=1, lty=2)
+# add first curve
+lines(X$pp[[1]], X$x[[1]], col='green', lwd=4, type='b', pch=19, 
+      cex=1, lty=1)
+
+for (i in 1:n){
+  t <- X$pp[[i]]
+  x <- X$x[[i]]
+  demean.fun <- function(x){
+    ind <- which.min(abs(pace.mean$t - x))
+    return(pace.mean$mean[ind])
+  }
+  X$x.demean[[i]] <- x - sapply(t, demean.fun)
+}
+xmi.demean <- min(unlist(X$x.demean))
+xma.demean <- max(unlist(X$x.demean))
+plot(seq(ymi, yma, length=5), seq(xmi.demean, xma.demean,length=5), 
+     type='n', xlab='t', ylab='X(t) (demean)')
+for(i in 1:n) { lines(X$pp[[i]], X$x.demean[[i]], col='gray', lwd=1, type='b', pch=19, 
+                      cex=1) }
+# add mean
+lines(seq(from = ymi, to = yma, length.out = nrow(pace.mean)), pace.mean$mean, 
+      col='red', lwd=4, type='b', pch=19, cex=1, lty=1)
+# add first curve
+lines(X$pp[[1]], X$x.demean[[1]], col='green', lwd=4, type='b', pch=19, 
+      cex=1, lty=1)
+
+PACE.FPCA.new <- fdapace::FPCA(Ly = X$x.demean, Lt = X$pp, list(FVEthreshold = 0.95))
+PACE.FPCA.new$cumFVE
+pace.mean.new <- data.frame(mean = PACE.FPCA.new$mu, 
+                            t = seq(from = ymi, to = yma, length.out = length(PACE.FPCA.new$mu)))
+# add new mean
+lines(seq(from = ymi, to = yma, length.out = nrow(pace.mean.new)), pace.mean.new$mean, 
+      col='orange', lwd=4, type='b', pch=19, cex=1, lty=1)
+
+## convert data into desired format
+i.length <- length(X$pp[[1]])
+data.table <- data.frame(id = rep(names(X$pp)[[1]], i.length), x.demean = X$x.demean[[1]], pp = X$pp[[1]])
+for (i in 2:length(X$pp)){
+  i.length <- length(X$pp[[i]])
+  temp <- data.frame(id = rep(names(X$pp)[[i]], i.length), x.demean = X$x.demean[[i]], pp = X$pp[[i]])
+  data.table <- rbind(data.table, temp)
+}
+
+```
+
+```{r Ex3 - run analysis}
+
+##### PACE #####
+PACE.FPCA$cumFVE 
+PACE.cov <- PACE.FPCA$smoothedCov
+PACE.FPC <- PACE.FPCA$phi
+#PACE.FPC[, 2] <- -1 * PACE.FPC[, 2] # flip PCs for comparison if needed
+
+##### RBFPCA #####
+seed <- 1234
+K.FPCA <- 3
+J.FPCA <- 3
+n.iter <- 5000
+cov.index <- 0
+
+registerDoMC((detectCores() - 1))
+RBFPCA <- RBFPCA.sparse(data.table = data.table, data = X, 
+                        num.basis = J.FPCA, num.PC = K.FPCA, 
+                        n.iter = n.iter, seed = seed,
+                        cov.index = cov.index, search.bw = round(n*0.05, 0))
+
+check.traceplot.RBFPCA.sparse(data = X, RBFPCA.sparse.result = RBFPCA, n.iter = n.iter,
+                              iter.burnin = 500, n.burnin = 50,
+                              i.plot = sample(1:length(X$x.demean), 1),  # sample one individual
+                              k1.plot = sample(1:K.FPCA, 1), # sample one PC
+                              k2.plot = sample(1:K.FPCA, 1)) # sample another PC
+iter.burnin <- n.iter/2
+n.thin <- 1
+
+Lambda.path <- lapply(RBFPCA$Lambda.inv, inv)
+Lambda.posterior.mean <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+
+CovFun <- function(s, t, cov.index){
+  if (cov.index == 1){
+    exp(-3*(t-s)^2)
+  } else {
+    min(s + 1, t + 1)
+  }
+}
+
+## U_k, L_k ##
+N.unique.tps <- length(unique(data.table$pp))
+N.unique.tps <- nrow(PACE.cov)
+timepts <- seq(-1, 1, length.out = N.unique.tps)
+Sigma.star <- matrix(nrow = N.unique.tps, ncol = N.unique.tps)
+if (cov.index == 0){
+  PACE <- fdapace::FPCA(Ly = X$x, Lt = X$pp, list(FVEthreshold = 0.99, nRegGrid = N.unique.tps))
+  Sigma.star = PACE.cov <- PACE$fittedCov
+} else{
+  for (i in 1:N.unique.tps){
+  for (j in 1:N.unique.tps){
+    Sigma.star[i,j] <- CovFun(s = timepts[i], t = timepts[j], cov.index)
+  }
+}
+}
+
+normalized.p.list <- legendre.polynomials(J.FPCA-1, normalized=TRUE)
+H <- matrix(nrow = N.unique.tps, ncol = J.FPCA)
+for (i in 1:length(normalized.p.list)){
+  H[,i] <- predict(normalized.p.list[[i]], newdata = timepts)
+}
+HH.inv <- inv(t(H) %*% H)
+xi <- HH.inv %*% t(H) %*% Sigma.star %*% H %*% HH.inv
+Uk <- eigen(xi)$vectors[,1:K.FPCA]
+
+
+RBFPCA.cov <- H %*% Uk %*% Lambda.posterior.mean %*% t(Uk) %*% t(H) # 51 * 51
+
+plot_ly(z = RBFPCA.cov, type = "surface")
+
+# cumulative variance explained
+RBFPCA.values.all <- eigen(RBFPCA.cov)$values # 51 * 1
+RBFPCA.values <- eigen(RBFPCA.cov)$values[1:K.FPCA] # 5 * 1
+(RBFPCA.cumFVE <- cumsum(RBFPCA.values) / sum(RBFPCA.values.all[RBFPCA.values.all > 0]))
+
+# get FPCs / eigenfunctions
+RBFPCA.FPC <- eigen(RBFPCA.cov)$vectors[, 1:K.FPCA] # 51 * 5
+
+# get fpc scores 
+xi.est <- matrix(nrow = n, ncol = K.FPCA)
+pb <- txtProgressBar(min = 1, max = n, style = 3)
+for (i in 1:n){
+  this.Sigma.inv <- lapply(RBFPCA$Sigma.inv, `[[`, i)
+  this.Sigma.inv.mean <- apply(simplify2array(this.Sigma.inv)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+  
+  sigma.hat <- RBFPCA$H[[i]] %*% RBFPCA$Uk[[i]] %*% Lambda.posterior.mean %*% t(RBFPCA$Uk[[i]]) %*% t(RBFPCA$H[[i]])
+  sigma.hat.inv <- inv(sigma.hat + this.Sigma.inv.mean)
+  for (j in 1:K.FPCA){
+    xi.est[i, j] <- RBFPCA.values[j] %*% t(eigen(sigma.hat)$vectors[, j]) %*% sigma.hat.inv %*% X$x.demean[[i]]
+  }
+  setTxtProgressBar(pb, i)
+}
+close(pb)
+
+
+RBFPCA.FPC.scores <- xi.est
+
+
+
+```
+
+```{r Ex3 - result and plot}
+
+## outlier detection
+threshold <- 0.99999
+dist.RBFPCA <- RobStatTM::covRob(RBFPCA.FPC.scores)$dist 
+est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = K.FPCA)]
+
+plot(seq(ymi, yma, length=5), seq(xmi, xma,length=5), type='n', xlab='Year', ylab='CD4 Cell Count', 
+     cex.lab = 1.5, cex.axis = 1.5)
+for(i in 1:n) {  lines(X$pp[[i]], X$x[[i]], col='gray', lwd=1, type='o', pch=20, 
+                     cex=0.8) }
+
+ii <- est.outlier.ind
+for(i in ii) lines(X$pp[[i]], X$x[[i]], col='blue', lwd=2, type='o', pch=20, 
+                   cex=0.8, lty=1)
+# Add a legend
+legend(3.833, 3135, legend=c("normal", "outlier"),
+       col=c("gray", "blue"), lty=1, cex=1.4)
+
+```
+
+```{r Ex3 - rerun analysis with outliers removed}
+
+X.new <- list(X = X$x[-est.outlier.ind], 
+              pp = X$pp[-est.outlier.ind], 
+              x.demean = X$x.demean[-est.outlier.ind])
+CheckData(X.new$X, X.new$pp)
+
+PACE.FPCA.new <- fdapace::FPCA(Ly = X.new$X, Lt = X.new$pp, list(FVEthreshold = 0.99))
+
+##### PACE #####
+PACE.FPCA.new$cumFVE 
+PACE.cov.new <- PACE.FPCA.new$smoothedCov
+PACE.FPC.new <- PACE.FPCA.new$phi
+#PACE.FPC[, 2] <- -1 * PACE.FPC[, 2]
+
+est.outlier.id.ind <- unique(data.table$id)[est.outlier.ind]
+data.table.new <- data.table %>%
+  dplyr::filter(!id %in% est.outlier.id.ind)
+
+##### RBFPCA #####
+seed <- 1234
+K.FPCA <- 3
+J.FPCA <- 3
+n.iter <- 5000
+cov.index <- 0
+
+registerDoMC((detectCores() - 1))
+RBFPCA.new <- RBFPCA.sparse(data.table = data.table.new, data = X.new, 
+                            num.basis = J.FPCA, num.PC = K.FPCA, 
+                            n.iter = n.iter, seed = seed,
+                            cov.index = cov.index, search.bw = round(n*0.05, 0))
+
+check.traceplot.RBFPCA.sparse(data = X.new, RBFPCA.sparse.result = RBFPCA.new, n.iter = n.iter,
+                              iter.burnin = 500, n.burnin = 50,
+                              i.plot = sample(1:length(X$x.demean), 1),  # sample one individual
+                              k1.plot = sample(1:K.FPCA, 1), # sample one PC
+                              k2.plot = sample(1:K.FPCA, 1)) # sample another PC
+iter.burnin <- n.iter/2
+n.thin <- 1
+
+Lambda.path.new <- lapply(RBFPCA.new$Lambda.inv, inv)
+Lambda.posterior.mean.new <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+
+CovFun <- function(s, t, cov.index){
+  if (cov.index == 1){
+    exp(-3*(t-s)^2)
+  } else {
+    min(s + 1, t + 1)
+  }
+}
+
+## U_k, L_k ##
+N.unique.tps.new <- length(unique(data.table.new$pp))
+N.unique.tps.new <- nrow(PACE.cov.new)
+timepts.new <- seq(-1, 1, length.out = N.unique.tps.new)
+Sigma.star.new <- matrix(nrow = N.unique.tps.new, ncol = N.unique.tps.new)
+if (cov.index == 0){
+  PACE.new <- fdapace::FPCA(Ly = X.new$x, Lt = X.new$pp, list(FVEthreshold = 0.99, nRegGrid = N.unique.tps.new))
+  Sigma.star.new = PACE.cov.new <- PACE.new$fittedCov
+} else{
+  for (i in 1:N.unique.tps){
+  for (j in 1:N.unique.tps){
+    Sigma.star.new[i,j] <- CovFun(s = timepts.new[i], t = timepts.new[j], cov.index)
+  }
+}
+}
+
+normalized.p.list <- legendre.polynomials(J.FPCA-1, normalized=TRUE)
+H.new <- matrix(nrow = N.unique.tps.new, ncol = J.FPCA)
+for (i in 1:length(normalized.p.list)){
+  H.new[,i] <- predict(normalized.p.list[[i]], newdata = timepts.new)
+}
+HH.inv.new <- inv(t(H.new) %*% H.new)
+xi.new <- HH.inv.new %*% t(H.new) %*% Sigma.star.new %*% H.new %*% HH.inv.new
+Uk.new <- eigen(xi.new)$vectors[,1:K.FPCA]
+
+
+RBFPCA.cov.new <- H.new %*% Uk.new %*% Lambda.posterior.mean.new %*% t(Uk.new) %*% t(H.new) # 51 * 51
+
+plot_ly(z = RBFPCA.cov.new, type = "surface")
+
+# plot the 3D surface
+par(mfrow = c(1, 1))
+plot.dim <- rbind(range(RBFPCA.cov), range(RBFPCA.cov.new),
+                  range(PACE.cov), range(PACE.cov.new))
+plot.min <- min(plot.dim[, 1])
+plot.max <- max(plot.dim[, 2])
+x <- y <- seq(ymi, yma, length.out = nrow(PACE.cov))
+persp(x, y, RBFPCA.cov, ticktype ="detailed", zlim = c(plot.min, plot.max),
+      xlab = "s", ylab = "t", zlab = "", #main = "RBFPCA",
+      theta = -60, phi = 25, #r = sqrt(3),
+      col = "white", shade = 0.01)
+persp(x, y, RBFPCA.cov.new, ticktype ="detailed", zlim = c(plot.min, plot.max),
+      xlab = "s", ylab = "t", zlab = "", #main = "RBFPCA", sub = "(3 outlying curves removed)",
+      theta = -60, phi = 25, #r = sqrt(3),
+      col = "white", shade = 0.01)
+persp(x, y, PACE.cov, ticktype ="detailed", zlim = c(plot.min, plot.max),
+      xlab = "s", ylab = "t", zlab = "", #main = "PACE",
+      theta = -60, phi = 25, #r = sqrt(3),
+      col = "white", shade = 0.01)
+persp(x, y, PACE.cov.new, ticktype ="detailed", zlim = c(plot.min, plot.max),
+      xlab = "s", ylab = "t", zlab = "", #main = "PACE",
+      theta = -60, phi = 25, #r = sqrt(3),
+      col = "white", shade = 0.01)
+
+
+
+filled.contour(x, y, cov2cor(RBFPCA.cov), main='complete data')
+filled.contour(x, y, cov2cor(RBFPCA.cov.new), main='outliers removed')
+
+
+
+# cumulative variance explained
+RBFPCA.values.all.new <- eigen(RBFPCA.cov.new)$values # 51 * 1
+RBFPCA.values.new <- eigen(RBFPCA.cov.new)$values[1:K.FPCA] # 5 * 1
+(RBFPCA.cumFVE.new <- cumsum(RBFPCA.values.new) / sum(RBFPCA.values.all.new[RBFPCA.values.all.new > 0]))
+
+
+
+```
+
