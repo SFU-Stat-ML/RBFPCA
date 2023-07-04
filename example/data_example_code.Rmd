@@ -1,7 +1,7 @@
 ---
 title: "Examples"
-author: "Erin Zhang"
-date: "15/11/2022"
+author: " "
+date: " "
 output: html_document
 ---
 
@@ -118,7 +118,7 @@ PACE.FPCA <- fdapace::FPCA(Ly = data.reformat$Ly, Lt = data.reformat$Lt, list(FV
 PACE.FPCA$cumFVE 
 
 PACE.FPC <- PACE.FPCA$phi
-#PACE.FPC[, 4] <- -1 * PACE.FPC[, 4] # flip PCs for comparison if needed
+
 
 ```
 
@@ -271,7 +271,6 @@ PACE.FPCA <- fdapace::FPCA(Ly = data.reformat$Ly, Lt = data.reformat$Lt, list(FV
 PACE.FPCA$cumFVE 
 
 PACE.FPC <- PACE.FPCA$phi
-#PACE.FPC[, c(1,2,4)] <- -1 * PACE.FPC[, c(1,2,4)]  # flip PCs for comparison if needed
 
 ```
 
@@ -351,7 +350,6 @@ ggplot() +
         panel.grid.major = element_blank()) +
   theme(legend.position = "bottom")
 
-#ggarrange(a, b, nrow = 1, ncol = 2, common.legend = TRUE)
 
 ## plot FPCs
 colnames(RBFPCA.FPC) <- paste0("FPC", seq(1, K.FPCA))
@@ -509,7 +507,7 @@ for (i in 2:length(X$pp)){
 PACE.FPCA$cumFVE 
 PACE.cov <- PACE.FPCA$smoothedCov
 PACE.FPC <- PACE.FPCA$phi
-#PACE.FPC[, 2] <- -1 * PACE.FPC[, 2] # flip PCs for comparison if needed
+
 
 ##### RBFPCA #####
 seed <- 1234
