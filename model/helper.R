@@ -59,16 +59,16 @@ BFPCA.robust.MC.beta.fix <- function(data, num.basis, num.PC, n.iter, seed, cov.
   #### start
   ## R ##
   R.diag <- apply(data, 1, function(x) (max(x) - min(x))^2)
-  R <- diag(R.diag) # TODO: this matrix is large, don't need to save this
+  R <- diag(R.diag) 
   
   ## 2r ##
   twor <- N.tps
   
   ## kappa ##
-  kappa <- (100/twor) * inv(R) # TODO: this matrix is large, don't need to save this
+  kappa <- (100/twor) * inv(R) 
   
   ## gamma ##
-  gamma <- 10^2 # each component of vec(D) is given an indep prior N(0, 10^2)
+  gamma <- 10 # each component of vec(D) is given an indep prior N(0, 10^2)
   #### end
   
   # Define the initial values -----------------------------
@@ -90,7 +90,7 @@ BFPCA.robust.MC.beta.fix <- function(data, num.basis, num.PC, n.iter, seed, cov.
   
   ## vec(D) ##
   D.path <- list()
-  vecD.diag <- rnorm(n = N.tps, mean = 0, sd = 10)
+  vecD.diag <- rnorm(n = N.tps, mean = 0, sd = gamma)
   D.path[[1]] <- vecD.diag 
   
   ## Sigma^-1 ##
@@ -146,7 +146,7 @@ BFPCA.robust.MC.beta.fix <- function(data, num.basis, num.PC, n.iter, seed, cov.
     number_of_chunks = nrow(res$B.temp) / N.tps
     B.temp.list = lapply(split(res$B.temp, rep(1:number_of_chunks, each = NROW(res$B.temp)/number_of_chunks)),
                          function(a) matrix(a, ncol = NCOL(res$B.temp)))
-    B.temp <- add(B.temp.list) + diag(x = 1/100, nrow = N.tps)
+    B.temp <- add(B.temp.list) + diag(x = 1/gamma, nrow = N.tps)
     b.temp <- colSums(res$b.temp)
     vecD.mean <- inv(B.temp) %*% b.temp
     vecD.varcov <- inv(B.temp)
@@ -242,16 +242,16 @@ BFPCA.robust.MC.beta.D.fix <- function(data, num.basis, num.PC, n.iter, seed, co
   #### start
   ## R ##
   R.diag <- apply(data, 1, function(x) (max(x) - min(x))^2)
-  R <- diag(R.diag) # TODO: this matrix is large, don't need to save this
+  R <- diag(R.diag) 
   
   ## 2r ##
   twor <- N.tps
   
   ## kappa ##
-  kappa <- (100/twor) * inv(R) # TODO: this matrix is large, don't need to save this
+  kappa <- (100/twor) * inv(R) 
   
   ## gamma ##
-  gamma <- 10^2 # each component of vec(D) is given an indep prior N(0, 10^2)
+  gamma <- 10 # each component of vec(D) is given an indep prior N(0, 10^2)
   #### end
   
   # Define the initial values -----------------------------
@@ -400,16 +400,16 @@ BFPCA.robust.MC.beta.D.Sigma.inv.fix <- function(data, num.basis, num.PC, n.iter
   #### start
   ## R ##
   R.diag <- apply(data, 1, function(x) (max(x) - min(x))^2)
-  R <- diag(R.diag) # TODO: this matrix is large, don't need to save this
+  R <- diag(R.diag) 
   
   ## 2r ##
   twor <- N.tps
   
   ## kappa ##
-  kappa <- (100/twor) * inv(R) # TODO: this matrix is large, don't need to save this
+  kappa <- (100/twor) * inv(R) 
   
   ## gamma ##
-  gamma <- 10^2 # each component of vec(D) is given an indep prior N(0, 10^2)
+  gamma <- 10 # each component of vec(D) is given an indep prior N(0, 10^2)
   #### end
   
   # Define the initial values -----------------------------
@@ -632,8 +632,6 @@ log.prior.fun <- function(data, beta, Lambda.inv, Zi, D, Sigma.inv){
   log.prior <- 0
   for (j in 1:ncol(data)){
     temp <- mvtnorm::dmvnorm(beta[j,], mean = rep(0, ncol(beta)), sigma = inv(Lambda.inv), log = TRUE) + 
-      # mnormt::dmtruncnorm(Zi[j,], mean = rep(0, ncol(Zi)), varcov = diag(x = 1, ncol = ncol(Zi), nrow = ncol(Zi)),
-      #                     lower = rep(0, ncol(Zi)), upper = rep(Inf, ncol(Zi)), log = TRUE) +  # not work for dim > 20
       mydtmvnorm(Zi[j,], mean = rep(0, ncol(Zi)), sigma = diag(x = 1, ncol = ncol(Zi), nrow = ncol(Zi)),
                  lower = rep(0, ncol(Zi)), upper = rep(Inf, ncol(Zi)), log = TRUE)
     log.prior <- log.prior + temp
@@ -645,7 +643,7 @@ log.prior.fun <- function(data, beta, Lambda.inv, Zi, D, Sigma.inv){
   kappa <- ((100/twor)*inv(R))[1:K.FPCA, 1:K.FPCA]
   
   log.prior.all <- log.prior + log(MCMCpack::dwish(Lambda.inv, v = 2*nrow(Lambda.inv), S = inv(BFPCA.robust.res$Lk))) +
-    sum(sapply(D, dnorm, mean = 0, sd = 10, log = TRUE)) +
+    sum(sapply(D, dnorm, mean = 0, sd = gamma, log = TRUE)) +
     log(mydwish(x = Sigma.inv[1:K.FPCA, 1:K.FPCA], nu = twor, S = 2*kappa))
   
   return(log.prior.all)
@@ -680,7 +678,7 @@ pi.D <- function(data, beta, Lambda.inv, Zi, Sigma.inv, D, H, Uk){
   number_of_chunks = nrow(res$B.temp) / N.tps
   B.temp.list = lapply(split(res$B.temp, rep(1:number_of_chunks, each = NROW(res$B.temp)/number_of_chunks)),
                        function(a) matrix(a, ncol = NCOL(res$B.temp)))
-  B.temp <- add(B.temp.list) + diag(x = 1/100, nrow = N.tps)
+  B.temp <- add(B.temp.list) + diag(x = 1/gamma, nrow = N.tps)
   b.temp <- colSums(res$b.temp)
   vecD.mean <- inv(B.temp) %*% b.temp
   vecD.varcov <- inv(B.temp)

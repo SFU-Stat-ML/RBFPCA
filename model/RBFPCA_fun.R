@@ -56,16 +56,16 @@ RBFPCA <- function(data, num.basis, num.PC, n.iter, seed, cov.index){
   
   ## R ##
   R.diag <- apply(data, 1, function(x) (max(x) - min(x))^2)
-  R <- diag(R.diag) # TODO: this matrix is large, don't need to save this
+  R <- diag(R.diag) 
   
   ## 2r ##
   twor <- N.tps
   
   ## kappa ##
-  kappa <- (100/twor) * inv(R) # TODO: this matrix is large, don't need to save this
+  kappa <- (100/twor) * inv(R) 
   
   ## gamma ##
-  gamma <- 10^2 # each component of vec(D) is given an indep prior N(0, 10^2)
+  gamma <- 10 # each component of vec(D) is given an indep prior N(0, 10^2)
   #### end
   
   # Define the initial values -----------------------------
@@ -79,7 +79,7 @@ RBFPCA <- function(data, num.basis, num.PC, n.iter, seed, cov.index){
   temp1 <- matrix(runif(K^2, min = 0, max = 1)*2-1, ncol=K) 
   Lambda.inv.path[[1]] <- inv(t(temp1) %*% temp1)
   
-  ##### this part is new -----
+  ##### this part is for skew elliptical distribution -----
   #### start
   ## Zi ##
   Zi.path <- list()
@@ -92,7 +92,7 @@ RBFPCA <- function(data, num.basis, num.PC, n.iter, seed, cov.index){
   
   ## vec(D) ##
   D.path <- list()
-  vecD.diag <- rnorm(n = N.tps, mean = 0, sd = 10)
+  vecD.diag <- rnorm(n = N.tps, mean = 0, sd = gamma)
   D.path[[1]] <- vecD.diag 
   
   ## Sigma^-1 ##
@@ -275,10 +275,6 @@ RBFPCA.sparse <- function(data.table, data, num.basis, num.PC, n.iter, seed, cov
       min(s + 1, t + 1)
     } else{
       exp(-1*(t-s)^2)
-      # sig2 <- 1
-      # rho <- 3
-      # d <- abs(outer(t,s,"-"))
-      # sig2*(1+sqrt(3)*d/rho)*exp(-sqrt(3)*d/rho) # for nu=3/2 (p=1)
     }
   }
   
@@ -390,7 +386,7 @@ RBFPCA.sparse <- function(data.table, data, num.basis, num.PC, n.iter, seed, cov
     kappa.list[[i]] <- kappa
     
     ## gamma ##
-    gamma <- 10^2 # each component of vec(D) is given an indep prior N(0, 10^2)
+    gamma <- 10 # each component of vec(D) is given an indep prior N(0, 10^2)
     #### end
     
     # Define the initial values for parameters whose sizes depend on n_i -----------------------------
@@ -440,7 +436,7 @@ RBFPCA.sparse <- function(data.table, data, num.basis, num.PC, n.iter, seed, cov
       Lambda.inv.p2 <- Lambda.inv.p2 + 
         (beta.path[[iter]][i,]) %*% t(beta.path[[iter]][i,])
     }
-    Lambda.inv.mat <- inv(Lk + Lambda.inv.p2)  # TODO: check this Lk
+    Lambda.inv.mat <- inv(Lk + Lambda.inv.p2)  
     Lambda.inv.path[[iter]] <- MCMCpack::rwish(v = Lambda.inv.df, S = Lambda.inv.mat)
     
     ## sample Zi from a T-dim Gaussian distribution
