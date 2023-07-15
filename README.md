@@ -1,8 +1,8 @@
-# Bayesian Robust Functional Principal Component Analysis
+# Robust Bayesian Functional Principal Component Analysis
 
 ## Summary
 
-This repository contains R code described in the manuscript "Bayesian Robust Functional Principal Component Analysis".
+This repository contains R code described in the manuscript "Robust Bayesian Functional Principal Component Analysis".
 
 - data folder contains datasets used in the example
 - model folder contains functions to implement the RBFPCA
