@@ -1,3 +1,82 @@
+# bisection function
+# - recursive implementation of bisection algorithm
+bisection <- function(low, high, W, u, phi ){
+  mid <- (low+high)/2
+  f.low <- rCESS( W, u, low, phi )
+  f.mid <- rCESS( W, u, mid, phi )
+  f.high <- rCESS( W, u, high, phi )
+  
+  if( f.low*f.high>0 )
+    stop('Invalid endpoint for bisection.')
+  
+  try({if( low>=high )
+    stop('bisection overlap')
+    
+    if( (abs(f.mid)<1e-10)||((high-low)/2<1e-10) )
+      return( mid )
+    if( (f.low*f.mid)<0 )
+      return( bisection( low, mid, W, u, phi ) )
+    if( (f.high*f.mid)<0 )
+      return( bisection( mid, high, W, u, phi ) )
+  })
+  
+  stop('bisection flawed')
+}
+
+# log-sum-exponential evaluation of log(sum(w))
+logsum <- function(logw){
+  logmax = max(logw)
+  log(sum(exp(logw-logmax)))+logmax
+}
+
+# relative conditional effective sample size
+rCESS <- function(W, u, a, phi) {
+  logw <- a*u          # weight update
+  exp(2*logsum(log(W)+logw) - logsum(log(W)+2*logw)) - phi
+}
+
+# effective sample size
+rESS <- function(logW){
+  K <- length(logW)
+  logWmax <- max(logW)
+  logRESS <- -(2*logWmax + log(sum(exp(2*logW-2*logWmax)))) - log(K)
+  return(exp(logRESS))
+}
+
+# systematic resampling algorithm
+systematic_resample <- function(W){
+  K <- length(W)
+  U <- runif(1,0,1/K) + 0:(K-1)/K
+  W.sum <- cumsum(W)
+  N <- rep(NA,K)
+  j <- 1
+  for( i in 1:K )
+  {
+    found = F
+    while( !found )
+    {
+      if( U[i]>W.sum[j] )
+        j <- j+1
+      else
+        found = T
+    }
+    N[i] <- j
+  }
+  return( N )
+}
+
+# remap labels in mixture model to prevent label switching
+ReMap.mm <- function(x){
+  x.unique <- unique(x)
+  x.remap <- vector(mode = "integer", length = length(x))
+  for (i in 1:length(x.unique)){
+    x.remap[x == x.unique[i]] <- i
+  }
+  return(x.remap)
+}
+
+
+# The following functions are used to calculate the log marginal likelihood estimates for Gibbs 
 BFPCA.robust.MC.beta.fix <- function(data, num.basis, num.PC, n.iter, seed, cov.index, beta){
   # data should be of dimension N.tps * N.subj
   

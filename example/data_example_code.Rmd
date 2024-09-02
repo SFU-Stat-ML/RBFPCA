@@ -22,7 +22,6 @@ library(refund)
 library(MCMCpack)
 library(plotly)
 library(mnormt)
-library(tmvtnorm)
 library(foreach)
 library(doMC)
 library(tmvnsim)
@@ -33,7 +32,7 @@ library(mvtnorm)
 library(matrixcalc)
 library(LaplacesDemon)
 
-source(file = "model/RBFPCA_fun.R")
+source(file = "model/RBFPCA_asmc_fun.R")
 source(file = "model/helper.R")
 
 ```
@@ -76,28 +75,29 @@ matplot(x=data.demean, lty=1, type="l",col="black")
 ##### RBFPCA #####
 K.FPCA <- 5
 seed <- 12345
-n.iter <- 5000
-n.thin <- 1
+# set tuning parameters in ASMC
+n.particles <- 200
+tuning_param <- list(eps=0.5, phi=0.9)
+n.cores <- detectCores()-1
 
-registerDoMC((detectCores() - 1))
-RBFPCA <- RBFPCA(data = data.demean, num.basis = 15, num.PC = K.FPCA,
-                 n.iter = n.iter, seed = seed, cov.index = 1)
+RBFPCA <- RBFPCA.ASMC.mvn(data = data, num.basis = 15, num.PC = K.FPCA,
+                          tuning_param = tuning_param, seed = seed, cov.index = 1,
+                          N.particles = n.particles, n.cores = n.cores)
 
-check.traceplot.RBFPCA(RBFPCA.result = RBFPCA, n.iter = n.iter/n.thin,
-                       iter.burnin = 50, n.burnin = 1,
-                       i.plot = sample(1:ncol(data.demean), 1),
-                       t.plot = sample(1:nrow(data.demean), 1),
-                       k1.plot = sample(1:K.FPCA, 1),
-                       k2.plot = sample(1:K.FPCA, 1))
-
-iter.burnin = n.iter/2
-
-Lambda.path <- lapply(RBFPCA$Lambda.inv, inv)
-Lambda.posterior.mean <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+R <- length(RBFPCA$W)
+# Resample particles proportional to their weights
+resampled_indices <- sample(1:n.particles, size = n.particles, replace = TRUE, prob = RBFPCA$W[[R]])
+# Get the resampled particles
+resampled_particles <- RBFPCA$particles[resampled_indices]
+Omega.inv.list <- lapply(resampled_particles, function(particle) particle$Omega.inv)
+Omega.path <- lapply(Omega.inv.list, inv)
+Omega.posterior.mean <- apply(simplify2array(Omega.path), 1:2, mean)
 H <- RBFPCA$H
 Uk <- RBFPCA$Uk
-RBFPCA.cov <- H %*% Uk %*% Lambda.posterior.mean %*% t(Uk) %*% t(H)
+# estimated covariance function
+RBFPCA.cov <- H %*% Uk %*% Omega.posterior.mean %*% t(Uk) %*% t(H) %>% round(10)
 RBFPCA.corr <- cov2cor(RBFPCA.cov)
+
 
 # cumulative variance explained
 RBFPCA.values <- eigen(RBFPCA.cov)$values
@@ -115,7 +115,7 @@ data.reformat <- fdapace::MakeFPCAInputs(tVec = seq(1, nrow(data), 1),
                                          yVec = t(data))
 CheckData(data.reformat$Ly, data.reformat$Lt)
 PACE.FPCA <- fdapace::FPCA(Ly = data.reformat$Ly, Lt = data.reformat$Lt, list(FVEthreshold = 0.9999))
-PACE.FPCA$cumFVE 
+PACE.FPCA$cumFVE
 
 PACE.FPC <- PACE.FPCA$phi
 
@@ -125,7 +125,7 @@ PACE.FPC <- PACE.FPCA$phi
 ```{r Ex1 - result and plot}
 
 ## outlier detection
-threshold <- 0.9999
+threshold <- 0.99
 dist.RBFPCA <- RobStatTM::covRob(RBFPCA.FPC.scores)$dist 
 est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = K.FPCA)]
 
@@ -155,47 +155,6 @@ ggplot() +
         plot.background = element_blank(),
         panel.grid.minor = element_blank(),
         panel.grid.major = element_blank())
-
-
-## plot FPCs
-colnames(RBFPCA.FPC) <- paste0("FPC", seq(1, K.FPCA))
-colnames(PACE.FPC) <- paste0("FPC", seq(1, ncol(PACE.FPC)))
-
-df.FPC.1 <- data.frame(time = 2*(1:N.tp),
-                       group = "RBFPCA",
-                       RBFPCA.FPC[, 1:4]) %>%
-  pivot_longer(cols = 3:(ncol(.)))
-df.FPC.2 <- data.frame(time = 2*(1:N.tp),
-                       group = "PACE",
-                       PACE.FPC[, 1:4]) %>%
-  pivot_longer(cols = 3:(ncol(.)))
-df.FPC <- bind_rows(df.FPC.1, df.FPC.2)
-df.FPC$group <- factor(df.FPC$group, levels = c("RBFPCA", "PACE"))
-
-ggplot() + 
-  geom_smooth(df.FPC, mapping = aes(x = time, y = value, color = group), linewidth = 0.5, se = FALSE) +
-  labs(x = "Depth", y = "FPC") +
-  scale_color_manual(name = "Methods",
-                     values = c("PACE" = "blue", "RBFPCA" = "black")) +
-  facet_wrap(.~name, nrow = 2) +
-  theme_bw(base_size = 14) 
-
-
-df.FPC.1$name[df.FPC.1$name == "FPC1"] = paste0("FPC1 (", round(RBFPCA.cumFVE[1], 4),")")
-df.FPC.1$name[df.FPC.1$name == "FPC2"] = paste0("FPC2 (", round(RBFPCA.cumFVE[2] - RBFPCA.cumFVE[1], 4),")")
-df.FPC.1$name[df.FPC.1$name == "FPC3"] = paste0("FPC3 (", round(RBFPCA.cumFVE[3] - RBFPCA.cumFVE[2], 4),")")
-df.FPC.1$name[df.FPC.1$name == "FPC4"] = paste0("FPC4 (", round(RBFPCA.cumFVE[4] - RBFPCA.cumFVE[3], 4),")")
-ggplot() + 
-  geom_smooth(df.FPC.1, mapping = aes(x = time, y = value), linewidth = 0.5, se = FALSE) +
-  geom_hline(yintercept = 0, color = "grey", linetype = 2) +
-  labs(x = "Depth", y = "FPC") +
-  facet_wrap(.~name, nrow = 2) +
-  theme_bw(base_size = 14) +
-  theme(axis.line = element_line(color='black', linewidth = 0.1),
-        plot.background = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.grid.major = element_blank())
-
 
 ```
 
@@ -228,28 +187,29 @@ matplot(x = data.demean, lty=1, type="l",col="black")
 
 ##### RBFPCA #####
 K.FPCA <- 5
-seed <- 12345
-n.iter <- 50
-n.thin <- 1
+seed <- 123456
 
-registerDoMC((detectCores() - 1))
-RBFPCA <- RBFPCA(data = data.demean, num.basis = 10, num.PC = K.FPCA,
-                          n.iter = n.iter, seed = seed, cov.index = 1)
+# set tuning parameters in ASMC
+n.particles <- 200
+tuning_param <- list(eps=0.5, phi=0.9)
+n.cores <- detectCores() - 1
 
-check.traceplot.RBFPCA(RBFPCA.result = RBFPCA, n.iter = n.iter/n.thin,
-                       iter.burnin = 50, n.burnin = 1,
-                       i.plot = sample(1:ncol(data.demean), 1),
-                       t.plot = sample(1:nrow(data.demean), 1),
-                       k1.plot = sample(1:K.FPCA, 1),
-                       k2.plot = sample(1:K.FPCA, 1))
+RBFPCA <- RBFPCA.ASMC.mvn(data = data.demean, num.basis = 10, num.PC = K.FPCA,
+                          tuning_param = tuning_param, seed = seed, cov.index = 1,
+                          N.particles = n.particles, n.cores = n.cores)
 
-iter.burnin = n.iter/2
-
-Lambda.path <- lapply(RBFPCA$Lambda.inv, inv)
-Lambda.posterior.mean <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+R <- length(RBFPCA$W)
+# Resample particles proportional to their weights
+resampled_indices <- sample(1:n.particles, size = n.particles, replace = TRUE, prob = RBFPCA$W[[R]])
+# Get the resampled particles
+resampled_particles <- RBFPCA$particles[resampled_indices]
+Omega.inv.list <- lapply(resampled_particles, function(particle) particle$Omega.inv)
+Omega.path <- lapply(Omega.inv.list, inv)
+Omega.posterior.mean <- apply(simplify2array(Omega.path), 1:2, mean)
 H <- RBFPCA$H
 Uk <- RBFPCA$Uk
-RBFPCA.cov <- H %*% Uk %*% Lambda.posterior.mean %*% t(Uk) %*% t(H)
+# estimated covariance function
+RBFPCA.cov <- H %*% Uk %*% Omega.posterior.mean %*% t(Uk) %*% t(H) %>% round(10)
 RBFPCA.corr <- cov2cor(RBFPCA.cov)
 
 # cumulative variance explained
@@ -351,48 +311,6 @@ ggplot() +
   theme(legend.position = "bottom")
 
 
-## plot FPCs
-colnames(RBFPCA.FPC) <- paste0("FPC", seq(1, K.FPCA))
-colnames(PACE.FPC) <- paste0("FPC", seq(1, ncol(PACE.FPC)))
-
-df.FPC.1 <- data.frame(time = 1:12,
-                       group = "RBFPCA",
-                       RBFPCA.FPC[, 1:4]) %>%
-  pivot_longer(cols = 3:(ncol(.)))
-df.FPC.2 <- data.frame(time = 1:12,
-                       group = "PACE",
-                       PACE.FPC[, 1:4]) %>%
-  pivot_longer(cols = 3:(ncol(.)))
-df.FPC <- bind_rows(df.FPC.1, df.FPC.2)
-df.FPC$group <- factor(df.FPC$group, levels = c("RBFPCA", "PACE"))
-
-ggplot() + 
-  geom_smooth(df.FPC, mapping = aes(x = time, y = value, color = group), linewidth = 0.5, se = FALSE) +
-  labs(x = "Month", y = "FPC") +
-  scale_color_manual(name = "Methods",
-                     values = c("PACE" = "blue", "RBFPCA" = "black")) +
-  scale_x_continuous(breaks = seq(1, 12)) +
-  facet_wrap(.~name, nrow = 2) +
-  theme_bw(base_size = 14) 
-  
-
-df.FPC.1$name[df.FPC.1$name == "FPC1"] = paste0("FPC1 (", round(RBFPCA.cumFVE[1], 4),")")
-df.FPC.1$name[df.FPC.1$name == "FPC2"] = paste0("FPC2 (", round(RBFPCA.cumFVE[2] - RBFPCA.cumFVE[1], 4),")")
-df.FPC.1$name[df.FPC.1$name == "FPC3"] = paste0("FPC3 (", round(RBFPCA.cumFVE[3] - RBFPCA.cumFVE[2], 4),")")
-df.FPC.1$name[df.FPC.1$name == "FPC4"] = paste0("FPC4 (", round(RBFPCA.cumFVE[4] - RBFPCA.cumFVE[3], 4),")")
-ggplot() + 
-  geom_smooth(df.FPC.1, mapping = aes(x = time, y = value), linewidth = 0.5, se = FALSE) +
-  geom_hline(yintercept = 0, color = "grey", linetype = 2) +
-  labs(x = "Month", y = "FPC") +
-  scale_x_continuous(breaks = seq(1, 12)) +
-  facet_wrap(.~name, nrow = 2) +
-  theme_bw(base_size = 14) +
-  theme(axis.line = element_line(color='black', linewidth = 0.1),
-        plot.background = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.grid.major = element_blank())
-
-
 ```
 
 
@@ -402,7 +320,7 @@ ggplot() +
 
 set.seed(1234)
 
-n.obs.min <- 3
+n.obs.min <- 5
 
 data(aids, package='catdata')
 X <- vector('list', 2) 
@@ -441,7 +359,7 @@ for(i in 1:n) { lines(X$pp[[i]], X$x[[i]], col='gray', lwd=1, type='o', pch=20,
                      cex=0.8) }
 lens <- sapply(X$x, length)
 
-ii <- c(sample((1:n)[lens==3], 1), sample((1:n)[lens==7], 1), 
+ii <- c(sample((1:n)[lens==5], 1), sample((1:n)[lens==7], 1), 
         sample((1:n)[lens==10], 1))
 for(i in ii) lines(X$pp[[i]], X$x[[i]], col='black', lwd=4, type='b', pch=19, 
                    cex=1, lty=1)
@@ -511,27 +429,35 @@ PACE.FPC <- PACE.FPCA$phi
 
 ##### RBFPCA #####
 seed <- 1234
-K.FPCA <- 3
-J.FPCA <- 3
-n.iter <- 5000
+num.PC <- 3
+num.basis <- 3
 cov.index <- 0
+N.particles <- 100
+n.cores <- detectCores() - 1
+  
+# set tuning parameters in ASMC
+tuning_param <- list(eps=0.5, phi=0.9)
 
-registerDoMC((detectCores() - 1))
-RBFPCA <- RBFPCA.sparse(data.table = data.table, data = X, 
-                        num.basis = J.FPCA, num.PC = K.FPCA, 
-                        n.iter = n.iter, seed = seed,
-                        cov.index = cov.index, search.bw = round(n*0.05, 0))
+RBFPCA <- RBFPCA.ASMC.mm.sparse(data.table = data.table, data = X,
+                                 num.basis = num.basis, num.PC = num.PC,
+                                 tuning_param = tuning_param, seed = seed,
+                                 cov.index = 0, search.bw = round(n*0.05, 0),
+                                 N.particles = N.particles, n.cores = n.cores)
 
-check.traceplot.RBFPCA.sparse(data = X, RBFPCA.sparse.result = RBFPCA, n.iter = n.iter,
-                              iter.burnin = 500, n.burnin = 50,
-                              i.plot = sample(1:length(X$x.demean), 1),  # sample one individual
-                              k1.plot = sample(1:K.FPCA, 1), # sample one PC
-                              k2.plot = sample(1:K.FPCA, 1)) # sample another PC
-iter.burnin <- n.iter/2
-n.thin <- 1
 
-Lambda.path <- lapply(RBFPCA$Lambda.inv, inv)
-Lambda.posterior.mean <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+R <- length(RBFPCA$W)
+# Resample particles proportional to their weights
+resampled_indices <- sample(1:N.particles, size = N.particles, replace = TRUE, prob = RBFPCA$W[[R]])
+# Get the resampled particles
+resampled_particles <- RBFPCA$particles[resampled_indices]
+
+Omega1.inv.list <- lapply(resampled_particles, function(particle) particle$Omega1.inv)
+Omega2.inv.list <- lapply(resampled_particles, function(particle) particle$Omega2.inv)
+Omega1.path1 <- lapply(Omega1.inv.list, inv)
+Omega2.path1 <- lapply(Omega2.inv.list, inv)
+Omega1.posterior.mean1 <- apply(simplify2array(Omega1.path1), 1:2, mean)
+Omega2.posterior.mean1 <- apply(simplify2array(Omega2.path1), 1:2, mean)
+pi1.path.mean <- sapply(resampled_particles, function(particle) particle$pi1) %>% mean()
 
 CovFun <- function(s, t, cov.index){
   if (cov.index == 1){
@@ -557,38 +483,46 @@ if (cov.index == 0){
 }
 }
 
-normalized.p.list <- legendre.polynomials(J.FPCA-1, normalized=TRUE)
-H <- matrix(nrow = N.unique.tps, ncol = J.FPCA)
+normalized.p.list <- legendre.polynomials(num.basis-1, normalized=TRUE)
+H <- matrix(nrow = N.unique.tps, ncol = num.basis)
 for (i in 1:length(normalized.p.list)){
   H[,i] <- predict(normalized.p.list[[i]], newdata = timepts)
 }
 HH.inv <- inv(t(H) %*% H)
 xi <- HH.inv %*% t(H) %*% Sigma.star %*% H %*% HH.inv
-Uk <- eigen(xi)$vectors[,1:K.FPCA]
+Uk <- eigen(xi)$vectors[,1:num.PC]
 
-
-RBFPCA.cov <- H %*% Uk %*% Lambda.posterior.mean %*% t(Uk) %*% t(H) # 51 * 51
+RBFPCA.cov <- (pi1.path.mean * H %*% Uk %*% Omega1.posterior.mean1 %*% t(Uk) %*% t(H) +
+  (1 - pi1.path.mean) * H %*% Uk %*% Omega2.posterior.mean1 %*% t(Uk) %*% t(H))
 
 plot_ly(z = RBFPCA.cov, type = "surface")
 
 # cumulative variance explained
-RBFPCA.values.all <- eigen(RBFPCA.cov)$values # 51 * 1
-RBFPCA.values <- eigen(RBFPCA.cov)$values[1:K.FPCA] # 5 * 1
+RBFPCA.values.all <- eigen(RBFPCA.cov)$values 
+RBFPCA.values <- eigen(RBFPCA.cov)$values[1:num.PC]
 (RBFPCA.cumFVE <- cumsum(RBFPCA.values) / sum(RBFPCA.values.all[RBFPCA.values.all > 0]))
 
 # get FPCs / eigenfunctions
-RBFPCA.FPC <- eigen(RBFPCA.cov)$vectors[, 1:K.FPCA] # 51 * 5
+RBFPCA.FPC <- eigen(RBFPCA.cov)$vectors[, 1:num.PC]
 
 # get fpc scores 
-xi.est <- matrix(nrow = n, ncol = K.FPCA)
+xi.est <- matrix(nrow = n, ncol = num.PC)
 pb <- txtProgressBar(min = 1, max = n, style = 3)
 for (i in 1:n){
-  this.Sigma.inv <- lapply(RBFPCA$Sigma.inv, `[[`, i)
-  this.Sigma.inv.mean <- apply(simplify2array(this.Sigma.inv)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
   
-  sigma.hat <- RBFPCA$H[[i]] %*% RBFPCA$Uk[[i]] %*% Lambda.posterior.mean %*% t(RBFPCA$Uk[[i]]) %*% t(RBFPCA$H[[i]])
-  sigma.hat.inv <- inv(sigma.hat + this.Sigma.inv.mean)
-  for (j in 1:K.FPCA){
+  Sigma1.inv.list <- lapply(resampled_particles, function(particle) particle$Sigma1.inv)
+  this.Sigma1.inv <- lapply(Sigma1.inv.list, `[[`, i)
+  this.Sigma1.inv.mean <- apply(simplify2array(this.Sigma1.inv), 1:2, mean)
+  Sigma2.inv.list <- lapply(resampled_particles, function(particle) particle$Sigma2.inv)
+  this.Sigma2.inv <- lapply(Sigma2.inv.list, `[[`, i)
+  this.Sigma2.inv.mean <- apply(simplify2array(this.Sigma2.inv), 1:2, mean)
+  
+  sigma.hat <- pi1.path.mean * RBFPCA$H[[i]] %*% RBFPCA$Uk[[i]] %*% Omega1.posterior.mean1 %*% t(RBFPCA$Uk[[i]]) %*%
+    t(RBFPCA$H[[i]]) + (1 - pi1.path.mean) * RBFPCA$H[[i]] %*% RBFPCA$Uk[[i]] %*% Omega2.posterior.mean1 %*%
+    t(RBFPCA$Uk[[i]]) %*% t(RBFPCA$H[[i]])
+  
+  sigma.hat.inv <- inv(sigma.hat + this.Sigma1.inv.mean + this.Sigma2.inv.mean)
+  for (j in 1:num.PC){
     xi.est[i, j] <- RBFPCA.values[j] %*% t(eigen(sigma.hat)$vectors[, j]) %*% sigma.hat.inv %*% X$x.demean[[i]]
   }
   setTxtProgressBar(pb, i)
@@ -605,9 +539,9 @@ RBFPCA.FPC.scores <- xi.est
 ```{r Ex3 - result and plot}
 
 ## outlier detection
-threshold <- 0.99999
+threshold <- 0.99997
 dist.RBFPCA <- RobStatTM::covRob(RBFPCA.FPC.scores)$dist 
-est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = K.FPCA)]
+est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = num.PC)]
 
 plot(seq(ymi, yma, length=5), seq(xmi, xma,length=5), type='n', xlab='Year', ylab='CD4 Cell Count', 
      cex.lab = 1.5, cex.axis = 1.5)
@@ -618,8 +552,8 @@ ii <- est.outlier.ind
 for(i in ii) lines(X$pp[[i]], X$x[[i]], col='blue', lwd=2, type='o', pch=20, 
                    cex=0.8, lty=1)
 # Add a legend
-legend(3.833, 3135, legend=c("normal", "outlier"),
-       col=c("gray", "blue"), lty=1, cex=1.4)
+legend(3.733, 3135, legend=c("normal", "outlier"),
+       col=c("gray", "blue"), lty=1, cex=1.55)
 
 ```
 
@@ -636,35 +570,41 @@ PACE.FPCA.new <- fdapace::FPCA(Ly = X.new$X, Lt = X.new$pp, list(FVEthreshold = 
 PACE.FPCA.new$cumFVE 
 PACE.cov.new <- PACE.FPCA.new$smoothedCov
 PACE.FPC.new <- PACE.FPCA.new$phi
-#PACE.FPC[, 2] <- -1 * PACE.FPC[, 2]
 
 est.outlier.id.ind <- unique(data.table$id)[est.outlier.ind]
 data.table.new <- data.table %>%
   dplyr::filter(!id %in% est.outlier.id.ind)
 
 ##### RBFPCA #####
-seed <- 1234
-K.FPCA <- 3
-J.FPCA <- 3
-n.iter <- 5000
+num.PC <- 3
+num.basis <- 3
 cov.index <- 0
+N.particles <- 100
+n.cores <- detectCores() - 1
+  
+# set tuning parameters in ASMC
+tuning_param <- list(eps=0.5, phi=0.9)
 
-registerDoMC((detectCores() - 1))
-RBFPCA.new <- RBFPCA.sparse(data.table = data.table.new, data = X.new, 
-                            num.basis = J.FPCA, num.PC = K.FPCA, 
-                            n.iter = n.iter, seed = seed,
-                            cov.index = cov.index, search.bw = round(n*0.05, 0))
+RBFPCA.new <- RBFPCA.ASMC.mm.sparse(data.table = data.table.new, data = X.new,
+                                 num.basis = num.basis, num.PC = num.PC,
+                                 tuning_param = tuning_param, seed = seed,
+                                 cov.index = cov.index, search.bw = round(n*0.05, 0),
+                                 N.particles = N.particles, n.cores = n.cores)
 
-check.traceplot.RBFPCA.sparse(data = X.new, RBFPCA.sparse.result = RBFPCA.new, n.iter = n.iter,
-                              iter.burnin = 500, n.burnin = 50,
-                              i.plot = sample(1:length(X$x.demean), 1),  # sample one individual
-                              k1.plot = sample(1:K.FPCA, 1), # sample one PC
-                              k2.plot = sample(1:K.FPCA, 1)) # sample another PC
-iter.burnin <- n.iter/2
-n.thin <- 1
 
-Lambda.path.new <- lapply(RBFPCA.new$Lambda.inv, inv)
-Lambda.posterior.mean.new <- apply(simplify2array(Lambda.path)[,,(iter.burnin+1):n.iter/n.thin], 1:2, mean)
+R <- length(RBFPCA.new$W)
+# Resample particles proportional to their weights
+resampled_indices <- sample(1:N.particles, size = N.particles, replace = TRUE, prob = RBFPCA.new$W[[R]])
+# Get the resampled particles
+resampled_particles <- RBFPCA.new$particles[resampled_indices]
+
+Omega1.inv.list <- lapply(resampled_particles, function(particle) particle$Omega1.inv)
+Omega2.inv.list <- lapply(resampled_particles, function(particle) particle$Omega2.inv)
+Omega1.path1 <- lapply(Omega1.inv.list, inv)
+Omega2.path1 <- lapply(Omega2.inv.list, inv)
+Omega1.posterior.mean1.new <- apply(simplify2array(Omega1.path1), 1:2, mean)
+Omega2.posterior.mean1.new <- apply(simplify2array(Omega2.path1), 1:2, mean)
+pi1.path.mean.new <- sapply(resampled_particles, function(particle) particle$pi1) %>% mean()
 
 CovFun <- function(s, t, cov.index){
   if (cov.index == 1){
@@ -690,54 +630,27 @@ if (cov.index == 0){
 }
 }
 
-normalized.p.list <- legendre.polynomials(J.FPCA-1, normalized=TRUE)
-H.new <- matrix(nrow = N.unique.tps.new, ncol = J.FPCA)
+normalized.p.list <- legendre.polynomials(num.basis-1, normalized=TRUE)
+H.new <- matrix(nrow = N.unique.tps.new, ncol = num.basis)
 for (i in 1:length(normalized.p.list)){
   H.new[,i] <- predict(normalized.p.list[[i]], newdata = timepts.new)
 }
 HH.inv.new <- inv(t(H.new) %*% H.new)
 xi.new <- HH.inv.new %*% t(H.new) %*% Sigma.star.new %*% H.new %*% HH.inv.new
-Uk.new <- eigen(xi.new)$vectors[,1:K.FPCA]
+Uk.new <- eigen(xi.new)$vectors[,1:num.PC]
 
-
-RBFPCA.cov.new <- H.new %*% Uk.new %*% Lambda.posterior.mean.new %*% t(Uk.new) %*% t(H.new) # 51 * 51
+RBFPCA.cov.new <- (pi1.path.mean.new * H.new %*% Uk.new %*% Omega1.posterior.mean1.new %*% t(Uk.new) %*% t(H.new) +
+  (1 - pi1.path.mean.new) * H.new %*% Uk.new %*% Omega2.posterior.mean1.new %*% t(Uk.new) %*% t(H.new))
 
 plot_ly(z = RBFPCA.cov.new, type = "surface")
-
-# plot the 3D surface
-par(mfrow = c(1, 1))
-plot.dim <- rbind(range(RBFPCA.cov), range(RBFPCA.cov.new),
-                  range(PACE.cov), range(PACE.cov.new))
-plot.min <- min(plot.dim[, 1])
-plot.max <- max(plot.dim[, 2])
-x <- y <- seq(ymi, yma, length.out = nrow(PACE.cov))
-persp(x, y, RBFPCA.cov, ticktype ="detailed", zlim = c(plot.min, plot.max),
-      xlab = "s", ylab = "t", zlab = "", #main = "RBFPCA",
-      theta = -60, phi = 25, #r = sqrt(3),
-      col = "white", shade = 0.01)
-persp(x, y, RBFPCA.cov.new, ticktype ="detailed", zlim = c(plot.min, plot.max),
-      xlab = "s", ylab = "t", zlab = "", #main = "RBFPCA", sub = "(3 outlying curves removed)",
-      theta = -60, phi = 25, #r = sqrt(3),
-      col = "white", shade = 0.01)
-persp(x, y, PACE.cov, ticktype ="detailed", zlim = c(plot.min, plot.max),
-      xlab = "s", ylab = "t", zlab = "", #main = "PACE",
-      theta = -60, phi = 25, #r = sqrt(3),
-      col = "white", shade = 0.01)
-persp(x, y, PACE.cov.new, ticktype ="detailed", zlim = c(plot.min, plot.max),
-      xlab = "s", ylab = "t", zlab = "", #main = "PACE",
-      theta = -60, phi = 25, #r = sqrt(3),
-      col = "white", shade = 0.01)
-
-
 
 filled.contour(x, y, cov2cor(RBFPCA.cov), main='complete data')
 filled.contour(x, y, cov2cor(RBFPCA.cov.new), main='outliers removed')
 
 
-
 # cumulative variance explained
-RBFPCA.values.all.new <- eigen(RBFPCA.cov.new)$values # 51 * 1
-RBFPCA.values.new <- eigen(RBFPCA.cov.new)$values[1:K.FPCA] # 5 * 1
+RBFPCA.values.all.new <- eigen(RBFPCA.cov.new)$values
+RBFPCA.values.new <- eigen(RBFPCA.cov.new)$values[1:num.PC] 
 (RBFPCA.cumFVE.new <- cumsum(RBFPCA.values.new) / sum(RBFPCA.values.all.new[RBFPCA.values.all.new > 0]))
 
 
