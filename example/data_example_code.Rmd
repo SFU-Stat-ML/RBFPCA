@@ -320,7 +320,7 @@ ggplot() +
 
 set.seed(1234)
 
-n.obs.min <- 5
+n.obs.min <- 3
 
 data(aids, package='catdata')
 X <- vector('list', 2) 
@@ -341,8 +341,8 @@ for(i in 1:n) {
 X$x <- X$x[!shorts]
 X$pp <- X$pp[!shorts]
 
-# This results in a data set with `N = 154` curves, 
-# where the number of observations per individual ranges between 5 and 11 (with a median of 6):
+# This results in a data set with `N = 241` curves, 
+# where the number of observations per individual ranges between 3 and 11 (with a median of 5):
 length(X$x)
 summary(lens <- sapply(X$x, length))
 table(lens)
@@ -539,7 +539,7 @@ RBFPCA.FPC.scores <- xi.est
 ```{r Ex3 - result and plot}
 
 ## outlier detection
-threshold <- 0.99997
+threshold <- 0.999999
 dist.RBFPCA <- RobStatTM::covRob(RBFPCA.FPC.scores)$dist 
 est.outlier.ind <- (1:length(dist.RBFPCA))[ dist.RBFPCA > qchisq(threshold, df = num.PC)]
 
